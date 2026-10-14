@@ -1,0 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+llama-index-core
+llama-index-readers-file
+llama-index-embeddings-huggingface
+sentence-transformers
+langchain
+langchain-core
+langchain-groq
+langchain-google-genai
+langchain-openai
+langchain-anthropic
+pypdf
+beautifulsoup4
+requests
+streamlit
+python-dotenv

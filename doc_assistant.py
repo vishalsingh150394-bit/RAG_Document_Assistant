@@ -82,9 +82,34 @@ def run_with_retry(fn, tries: int = 4, wait: int = 20):
 # ## 2. Ingestion: PDFs / text files / web pages -> LlamaIndex `Document`s
 
 # %%
+def _read_pdf(path: str) -> List[Document]:
+    """One Document per page. Layout mode keeps each table row on one line ('label | v1 | v2')."""
+    from pypdf import PdfReader
+    name, docs = os.path.basename(path), []
+    for i, page in enumerate(PdfReader(path).pages, 1):
+        try:
+            text = page.extract_text(extraction_mode="layout")
+        except TypeError:                       # very old pypdf
+            text = page.extract_text()
+        lines = [re.sub(r"\s{2,}", " | ", ln.strip()) for ln in (text or "").splitlines() if ln.strip()]
+        if lines:
+            docs.append(Document(text="\n".join(lines),
+                                 metadata={"file_name": name, "page_label": str(i), "source_type": "pdf"}))
+    return docs
+
+
 def load_files(paths) -> List[Document]:
-    """PDF, TXT, MD, DOCX... (one Document per PDF page, with file_name and page_label metadata)."""
-    return SimpleDirectoryReader(input_files=[str(p) for p in paths]).load_data()
+    """PDFs (page-wise, table-friendly) plus TXT / MD / DOCX via LlamaIndex SimpleDirectoryReader."""
+    docs, others = [], []
+    for p in paths:
+        p = str(p)
+        if p.lower().endswith(".pdf"):
+            docs.extend(_read_pdf(p))
+        else:
+            others.append(p)
+    if others:
+        docs.extend(SimpleDirectoryReader(input_files=others).load_data())
+    return docs
 
 
 def load_web(url: str) -> List[Document]:
@@ -148,7 +173,8 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
     ("system",
      "You are a careful document assistant. Answer ONLY from the numbered context passages. "
      "If the answer is not in the context, say you could not find it in the documents and set found_in_documents to false. "
-     "Never use outside knowledge. Be concise and mention passage numbers like [1].\n\n{format_instructions}"),
+     "Never use outside knowledge. Text from tables appears as rows like 'label | value | value': match each label only with the values on its own row, and check the column order. "
+     "Be concise and mention passage numbers like [1].\n\n{format_instructions}"),
     ("human", "Conversation so far:\n{history}\n\nContext passages:\n{context}\n\nQuestion: {question}"),
 ]).partial(format_instructions=answer_parser.get_format_instructions())
 
@@ -252,6 +278,11 @@ class DocAssistant:
             for i, n in enumerate(nodes, 1))
         res = run_with_retry(lambda: self.chains["qa"].invoke(
             {"history": hist_txt, "context": context, "question": standalone}))
+        if not res.found_in_documents:           # small models sometimes miss: ask once more before giving up
+            retry = run_with_retry(lambda: self.chains["qa"].invoke(
+                {"history": hist_txt, "context": context, "question": standalone}))
+            if retry.found_in_documents:
+                res = retry
         all_sources = [{"id": i, "file": n.metadata.get("file_name"), "page": n.metadata.get("page_label", "-"),
                         "score": round(float(n.score), 3) if n.score is not None else None,
                         "snippet": n.get_content()[:300]} for i, n in enumerate(nodes, 1)]
